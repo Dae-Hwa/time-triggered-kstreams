@@ -82,5 +82,3 @@
 
 ### 결정 요약
 - Wall-Clock, 분 경계 정렬 지원, 파티션별 기본 + 글로벌 옵션, Processor/Transformer 모두 제공, 필요 시 스토어 접근 허용, 기본 At-Least-Once, 테스트는 짧은 간격으로 수행.
-
-

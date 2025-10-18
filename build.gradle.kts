@@ -38,6 +38,10 @@ dependencies {
     testImplementation("org.testcontainers:junit-jupiter")
     testImplementation("org.testcontainers:kafka")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    // Kafka Streams test utilities for TopologyTestDriver
+    testImplementation("org.apache.kafka:kafka-streams-test-utils")
+    // Kotest assertions (use with JUnit5)
+    testImplementation("io.kotest:kotest-assertions-core:5.9.1")
 }
 
 kotlin {
