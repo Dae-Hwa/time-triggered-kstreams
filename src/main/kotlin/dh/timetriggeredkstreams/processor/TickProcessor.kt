@@ -15,7 +15,8 @@ import java.time.Duration
 
 class TickProcessor<KOut, VOut>(
     private val schedulerConfig: TickSchedulerConfig,
-    private val tickHandler: TickHandler<KOut, VOut>
+    private val tickHandler: TickHandler<KOut, VOut>,
+    private val timeProvider: () -> Long = { System.currentTimeMillis() }
 ) : Processor<Any, Any, KOut, VOut> {
 
     private lateinit var context: ProcessorContext<KOut, VOut>
@@ -44,22 +45,11 @@ class TickProcessor<KOut, VOut>(
             if (!isLeaderTask) return
         }
 
+        // If alignToMinute is true, we will wait until every minute on the minute
         if (schedulerConfig.alignToMinute) {
-            val now = System.currentTimeMillis()
-            val delayMs = millisToNextMinute(now)
-            initialSchedule = context.schedule(Duration.ofMillis(delayMs), PunctuationType.WALL_CLOCK_TIME) { timestamp ->
-                handleTick(timestamp)
-                // Switch to periodic schedule aligned to minute
-                periodicSchedule = context.schedule(schedulerConfig.intervalDuration(), PunctuationType.WALL_CLOCK_TIME) { ts ->
-                    handleTick(ts)
-                }
-                initialSchedule?.cancel()
-                initialSchedule = null
-            }
+            scheduleAlignedToMinute()
         } else {
-            periodicSchedule = context.schedule(schedulerConfig.intervalDuration(), PunctuationType.WALL_CLOCK_TIME) { timestamp ->
-                handleTick(timestamp)
-            }
+            schedulePeriodic()
         }
     }
 
@@ -93,7 +83,32 @@ class TickProcessor<KOut, VOut>(
         val nextMinute = ((nowMs / 60_000) + 1) * 60_000
         return nextMinute - nowMs
     }
+
+    private fun scheduleAlignedToMinute() {
+        val now = timeProvider()
+        val delayMs = millisToNextMinute(now)
+        initialSchedule = context.schedule(
+            Duration.ofMillis(delayMs),
+            PunctuationType.WALL_CLOCK_TIME
+        ) { timestamp ->
+            handleTick(timestamp)
+            periodicSchedule = context.schedule(
+                schedulerConfig.intervalDuration(),
+                PunctuationType.WALL_CLOCK_TIME
+            ) { ts ->
+                handleTick(ts)
+            }
+            initialSchedule?.cancel()
+            initialSchedule = null
+        }
+    }
+
+    private fun schedulePeriodic() {
+        periodicSchedule = context.schedule(
+            schedulerConfig.intervalDuration(),
+            PunctuationType.WALL_CLOCK_TIME
+        ) { timestamp ->
+            handleTick(timestamp)
+        }
+    }
 }
-
-
-
