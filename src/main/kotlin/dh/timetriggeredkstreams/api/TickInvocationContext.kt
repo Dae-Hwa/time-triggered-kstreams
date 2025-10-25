@@ -12,5 +12,3 @@ class TickInvocationContext(
     fun readOnly(): StoreAccessor.ReadOnly? = storeAccessor?.asReadOnly()
     fun rawContext(): ProcessorContext<*, *>? = processorContext
 }
-
-

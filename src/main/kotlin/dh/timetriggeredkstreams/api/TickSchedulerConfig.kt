@@ -13,5 +13,3 @@ data class TickSchedulerConfig(
 
     fun intervalDuration(): Duration = Duration.ofMillis(intervalMs)
 }
-
-

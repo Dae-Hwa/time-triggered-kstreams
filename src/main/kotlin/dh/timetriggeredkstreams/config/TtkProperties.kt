@@ -11,5 +11,3 @@ data class TtkProperties(
     val outputTopic: String = "time-triggered-ticks",
     val storeName: String? = null,
 )
-
-
