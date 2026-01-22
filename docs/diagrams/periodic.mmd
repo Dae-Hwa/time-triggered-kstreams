@@ -1,0 +1,18 @@
+sequenceDiagram
+    participant WC as WallClock Scheduler
+    participant TP as TickProcessor
+    participant TH as TickHandler
+    participant Sink as Sink Node
+    participant Topic as Output Topic
+
+    WC-->>TP: onPunctuate(timestampMs)
+    TP->>TH: onTick(TickInvocationContext)
+    TH-->>TP: KeyValue? (nullable)
+    alt KeyValue != null
+        TP->>Sink: forward(Record(key, value, timestampMs))
+        Sink->>Topic: append
+    else
+        Note over TP: no output this tick
+    end
+
+
