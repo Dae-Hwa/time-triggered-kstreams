@@ -2,6 +2,8 @@ package dh.timetriggeredkstreams.api
 
 import java.time.Duration
 
+enum class CatchUpMode { LATEST_ONLY, CATCH_UP_ALL, CATCH_UP_BOUNDED }
+
 data class TickSchedulerConfig(
     val intervalMs: Long = 60_000,
     val alignToMinute: Boolean = true,
