@@ -1,0 +1,14 @@
+sequenceDiagram
+    participant TP as TickProcessor
+    participant WC as WallClock Scheduler
+
+    TP->>WC: schedule(delayToNextMinute, WALL_CLOCK)
+    WC-->>TP: onPunctuate(minuteBoundaryTs)
+    TP->>TP: handleTick(minuteBoundaryTs)
+    TP->>WC: schedule(intervalMs periodic, WALL_CLOCK)
+    loop every intervalMs
+        WC-->>TP: onPunctuate(nextTs)
+        TP->>TP: handleTick(nextTs)
+    end
+
+

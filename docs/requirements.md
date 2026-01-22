@@ -1,84 +1,259 @@
-## Time-Triggered Kafka Streams - Requirements & Decisions
+# Time-triggered Kafka Streams (tick-handler) 설계 문서 v3 (Requirements 통합 + 명확성 강화)
+
+## 0. 목적과 배경
 
 ### 목표
-- Kafka Streams Processor/Transformer API를 이용해 Punctuator 기반 1분 트리거 구현
-- 입력 유무와 관계없이 주기적으로 출력 레코드 발행 가능
-- 라이브러리 형태로 재사용/배포 가능하도록 설계
 
-### 트리거 기준 (Wall-Clock vs Stream-Time)
-- 결정: Wall-Clock Time 사용
-- 설명: Wall-Clock은 시스템 실시간을 기준으로 고정 간격으로 동작. 입력 레코드가 없어도 1분마다 트리거됨. Stream-Time은 입력 레코드의 타임스탬프 진행에 의존하여 입력이 없으면 정지할 수 있음.
+* **입력 메시지가 없어도** 지정한 **인터벌(예: 60초)** 단위로 트리거가 **반드시 실행**되게 한다.
+* 시작 초(second) 단위는 틀어져도 허용하되, **“인터벌이 경과하면 최소 1회 실행”** 의미론을 보장한다.
+* 지연/누락(catch-up) 처리 방식은 **옵션으로 제공**한다.
+* 라이브러리 형태로 재사용/배포 가능하도록 설계한다.
 
-### 분 경계 정렬
-- 결정: 분 경계(예: HH:mm:00) 정렬 지원. 애플리케이션 시작 후 다음 분 경계에 첫 발사, 이후 매분 정각 발사.
-- 구현 포인트: 첫 스케줄링 시 현재 시간을 기준으로 다음 분 경계까지 대기 후 고정 간격 스케줄.
+### 기존 문제
 
-### 스코프 (파티션별 vs 글로벌 단일)
-- 기본: 파티션/태스크별 트리거 동작 (각 태스크가 독립적으로 매분 실행)
-- 옵션: 글로벌 단일 트리거 모드 제공(향후 확장). 구현 아이디어:
-  - 파티션 0만 수행하도록 조건 설정하거나
-  - 글로벌 StateStore에 리더 선출 플래그를 저장하고 TTL/갱신으로 리더십 유지
+* Kafka Streams 윈도우/서프레션은 stream-time(event-time)에 의존하는 경우가 많아 **입력이 없으면 동작이 정지**할 수 있다.
+* Kafka/Kafka Streams는 정밀 스케줄러가 아니므로, wall-clock 기반도 **지연/지터**가 발생할 수 있다.
+* 따라서 “정각 실행 보장”이 아니라 **논리적 인터벌 의미론**을 유지하는 보정 로직이 필요하다.
 
-### 출력 동작
-- 라이브러리에서 사용자 정의 콜백(함수형 인터페이스)으로 트리거 시 실행할 로직 주입 가능하게 설계
-- 입력이 없어도 발행: Kafka Streams 특성상 최소 하나의 소스 노드가 필요. 빈 앵커 토픽(또는 글로벌 스토어)로 태스크를 생성한 뒤 Wall-Clock Punctuator가 주기 발행 수행
-- 임시 출력 토픽(예: `time-triggered-ticks`)을 기본값으로 제공하되 설정으로 변경 가능
+---
 
-### Processor vs Transformer 차이 설명 및 선택
-- Processor API:
-  - Topology를 수동으로 구성(`Topology.addSource/Processor/Sink`)
-  - `ProcessorContext.schedule()`로 Punctuator 등록
-  - 레코드 없이도 동작하는 순수 프로세서 체인을 만들기 쉬움
-- Transformer (DSL):
-  - `KStream.transform()`/`transformValues()`로 DSL 안에 주입
-  - `ProcessorContext`에 접근 가능하여 `schedule()` 사용 가능
-  - DSL 파이프라인에 쉽게 결합 가능
-- 결정: 라이브러리에서 두 가지 어댑터를 모두 제공
-  - DSL 사용자: `Transformer` 구현체 제공
-  - 저수준 사용자: `Processor` 구현체 제공
+## 1. 트리거 기준 (Wall-Clock vs Stream-Time)
 
-### State Store 사용 및 TTL 설명
-- 요구: 필요 시 스토어에서 읽기/쓰기 가능해야 함
-- 설계:
-  - 옵션으로 `KeyValueStore`(RocksDB 또는 In-Memory) 바인딩 지원
-  - 트리거 콜백에서 `ReadOnlyKeyValueStore`/`KeyValueStore` 접근 가능 API 제공
-- TTL(왜 필요한가?):
-  - 주기적 집계나 리더십(글로벌 모드) 유지에 만료 개념이 필요할 수 있음
-  - 예: 글로벌 리더 플래그에 TTL을 두어 장애 시 자동 승계, 또는 오래된 캐시/집계 데이터 청소
-  - 초기 버전은 TTL 강제하지 않고 옵션으로 제공
+### 결정: Wall-Clock Time 사용
 
-### 정확성/트랜잭션
-- 기본: At-Least-Once
-- 옵션: Exactly-Once V2로 향후 확장 가능(프로듀서 트랜잭션 및 EOS 설정 추가)
+* Wall-Clock은 시스템 시간을 기준으로 고정 간격 동작하며, 입력 레코드가 없어도 실행 가능
+* Stream-Time은 입력 timestamp 진행에 의존하여 입력이 없으면 정지 가능
 
-### 테스트 전략
-- 단위 테스트: `TopologyTestDriver` 사용, 테스트 프로파일에서 간격 5초 등으로 단축
-- 통합 테스트: Testcontainers Kafka 사용, 주기 발행 검증
-- 프레임워크: JUnit + Kotest assertions 조합 사용
+---
 
-### 운영/구성
-- 토픽: 기본값 `time-triggered-ticks` (key: string, value: json/string), 설정으로 변경 가능
-- 부트스트랩 서버: 테스트는 Testcontainers, 로컬/운영은 설정 주입
-- Docker Compose: 카프카/주키퍼(또는 KRaft 모드) 추가 예정
+## 2. 분 경계 정렬(alignToMinute)
 
-### NTP 동기화 설명
-- NTP(Network Time Protocol)는 서버 시간을 공인 시간원본에 맞추는 프로토콜
-- Wall-Clock 기반 스케줄은 시스템 시간이 정확해야 분 경계 정렬 정확도가 높음
-- 클러스터 노드 간 시간이 크게 어긋나면 파티션별 트리거 시점 불일치 가능성 증가 → NTP로 시간 동기화 권장
+### 결정: 분 경계 정렬 옵션 제공
 
-### 구성 옵션(초안)
-- intervalMs: 기본 60_000ms
-- alignToMinute: true/false (기본 true)
-- scope: partition | global-singleton (기본 partition)
-- outputTopic: 기본 `time-triggered-ticks`
-- serde: key/value Serde 설정
-- store: optional store name/type
+* alignToMinute=true: 앱 시작 후 **다음 분 경계(HH:mm:00)** 를 첫 due로 설정하고 이후 interval 단위로 due 전진
+* alignToMinute=false: 시작 시점 기준 `now + interval`을 첫 due로 설정
 
-### 공개 API(초안)
-- 라이브러리 컴포넌트
-  - `TickProcessor` / `TickTransformer`
-  - `TickSchedulerConfig(intervalMs, alignToMinute, scope, ...)`
-  - `TickHandler`(콜백 인터페이스): `onTick(context, storeAccessor)`
+### 주의(의미 명확화)
 
-### 결정 요약
-- Wall-Clock, 분 경계 정렬 지원, 파티션별 기본 + 글로벌 옵션, Processor/Transformer 모두 제공, 필요 시 스토어 접근 허용, 기본 At-Least-Once, 테스트는 짧은 간격으로 수행.
+* “정각에 실제 실행”은 best-effort
+* 본 설계는 `fireAtEpochMs`(논리 due)를 분 경계로 고정하여 **논리 시각 의미론**을 유지한다.
+
+---
+
+## 3. 핵심 설계: 논리 due-time 기반 인터벌 보장
+
+### 핵심 아이디어
+
+* store에 `next_due_ms`를 저장한다.
+* 스케줄 콜백은 “실행”이 아니라 “검사(check)”에 사용한다.
+* 매 검사 시 `wallClockNow >= nextDue`이면 tick을 실행한다.
+* 실행 후 nextDue는 wallClockNow로 재설정하지 않고, **논리적으로 전진**한다(드리프트 방지).
+
+### 검사 주기(checkPeriod) 분리
+
+* 실행 주기(intervalMs)와 검사 주기(checkPeriodMs)를 분리한다.
+* 권장 기본값: `checkPeriodMs = 1000` (1초)
+* 목적: “1분이 지났는데도 실행이 안 됨”을 줄이고, 인터벌 의미론을 강하게 만든다.
+
+---
+
+## 4. 누락(catch-up) 정책 옵션
+
+### CatchUpMode
+
+* `LATEST_ONLY` : 누락이 있어도 **1회만 실행**
+* `CATCH_UP_ALL` : 누락된 인터벌 수만큼 **모두 실행**
+* `CATCH_UP_BOUNDED(maxCatchUp)` : 최대 N회까지만 실행(기본 예: 60)
+
+### 공통 계산(정의)
+
+* nextDue: store에 저장된 다음 논리 실행 시각
+* interval: intervalMs
+* missed: `(wallClockNow - nextDue) / interval` (wallClockNow >= nextDue일 때)
+* dueCount = missed + 1
+* lastDue = nextDue + missed*interval
+
+### 모드별 실행
+
+* LATEST_ONLY
+
+  * fireAt = lastDue (1회 실행)
+  * skippedCount = dueCount - 1
+  * nextDue = lastDue + interval
+* CATCH_UP_ALL
+
+  * fireAt = nextDue, nextDue+interval, ... lastDue (dueCount회)
+  * skippedCount = 0
+  * nextDue = lastDue + interval
+* CATCH_UP_BOUNDED
+
+  * runCount = min(dueCount, maxCatchUp)
+  * 최신 기준 실행: lastDue-(runCount-1)*interval ... lastDue
+  * skippedCount = dueCount - runCount
+  * nextDue = lastDue + interval
+
+---
+
+## 5. 스코프 (파티션별 vs 글로벌 단일)
+
+### 기본: PARTITION (태스크/파티션별 트리거)
+
+* 각 태스크가 독립적으로 tick을 발생
+
+### 옵션: GLOBAL_SINGLETON (전역 단일 트리거)
+
+* 1안(현재 구현 방향): **partition 0만 실행**
+* 2안(향후 확장): 글로벌 store에 리더 플래그 + TTL/갱신으로 리더십 유지(장애 시 승계)
+
+  * 초기 버전에서는 1안을 기본으로 두고 2안은 확장 포인트로 남긴다.
+
+---
+
+## 6. 출력 동작 및 “앵커 토픽” 요구사항
+
+### 입력이 없어도 발행하려면?
+
+* Kafka Streams는 최소 하나의 소스 노드가 필요
+* 따라서 “빈 앵커 토픽(예: ttk-anchor)”을 소스로 두고, 레코드는 무시하되 wall-clock 기반 스케줄로 주기 발행을 수행한다.
+
+### 출력 토픽
+
+* 기본값: `time-triggered-ticks`
+* 설정으로 변경 가능
+
+### Serde
+
+* key/value Serde 설정을 구성 옵션으로 제공(기본값은 라이브러리에서 합리적으로 선택)
+* (구현 시) Topology/DSL 경로 모두에서 Serde 주입 포인트 제공
+
+---
+
+## 7. Processor vs Transformer
+
+### Processor API
+
+* Topology를 수동 구성(addSource/addProcessor/addSink)
+* ProcessorContext.schedule()로 punctuator 등록
+* “입력 무시 + 주기 발행” 체인 구성에 유리
+
+### Transformer (DSL)
+
+* KStream.transform()/transformValues()로 DSL에 삽입
+* schedule() 사용 가능
+* DSL 파이프라인 결합이 용이
+
+### 결정
+
+* 라이브러리에서 두 가지 어댑터 모두 제공(Processor/Transformer)
+
+---
+
+## 8. State Store 사용 및 TTL
+
+### 요구
+
+* 필요 시 tick 로직에서 store read/write 가능해야 함
+
+### 설계
+
+* KeyValueStore 바인딩 지원(in-memory 또는 persistent(RocksDB))
+* TickInvocationContext를 통해 ReadOnly/ReadWrite 접근 제공
+
+### TTL(옵션)
+
+* 글로벌 리더십 유지/캐시 청소/집계 만료 등에서 필요할 수 있음
+* 초기 버전은 TTL을 강제하지 않고 옵션/확장 포인트로 제공
+
+---
+
+## 9. API/모델 (명확성 강화: 확정)
+
+### 9.1 TickSchedulerConfig 확장
+
+* intervalMs: Long = 60_000
+* alignToMinute: Boolean = true
+* checkPeriodMs: Long = 1_000
+* catchUpMode: CatchUpMode = LATEST_ONLY
+* maxCatchUp: Int = 60
+* scope: PARTITION | GLOBAL_SINGLETON
+* outputTopic: String = "time-triggered-ticks"
+* storeName: String? = null
+* (선택) storeType: IN_MEMORY | PERSISTENT
+
+```kotlin
+enum class CatchUpMode { LATEST_ONLY, CATCH_UP_ALL, CATCH_UP_BOUNDED }
+```
+
+### 9.2 TickInvocationContext (명확성 강화)
+
+* wallClockNowEpochMs: Long        // 스케줄 콜백이 실제로 실행된 시각
+* fireAtEpochMs: Long              // 논리적으로 이번 tick이 “발생해야 하는” 시각(due)
+* dueCount: Long                   // 이번 체크에서 논리상 처리 대상 tick 개수
+* skippedCount: Long               // 실제 실행하지 않은 tick 개수(bounded 또는 latest-only에서 발생 가능)
+* catchUpMode: CatchUpMode         // 적용된 정책
+* taskId: String
+* processorContext: ProcessorContext<*, *>?
+* storeAccessor: StoreAccessor?
+
+주의: 기존 nowEpochMs는 제거 또는 deprecated 처리하여 의미 혼동을 피한다.
+
+### 9.3 TickHandler
+
+* `onTick(context: TickInvocationContext): KeyValue<K, V>?`
+
+---
+
+## 10. 구현 변경 포인트(작업 단위)
+
+### 10.1 TickProcessor
+
+* schedule을 intervalMs가 아니라 checkPeriodMs로 등록
+* store에서 next_due_ms 읽기/초기화(alignToMinute 반영)
+* wallClockNow >= nextDue이면 모드별 실행
+* TickInvocationContext를 wallClockNow/fireAt/dueCount/skippedCount로 채워 handler 호출
+* 실행 후 next_due_ms 갱신(드리프트 방지)
+
+### 10.2 TickTransformer
+
+* TickProcessor와 동일한 보정 로직 적용
+* transform()은 null 반환(입력 무시)
+
+### 10.3 TickTopologyBuilder
+
+* 앵커 토픽/출력 토픽 기본값 유지
+* storeType/persistent 옵션 지원(선택)
+* scope/global 모드 선택 반영
+
+---
+
+## 11. 정확성/트랜잭션
+
+* 기본: At-Least-Once
+* 옵션: Exactly-Once V2는 향후 확장(설정 및 프로듀서 트랜잭션 포함)
+
+---
+
+## 12. 테스트 전략
+
+* 단위 테스트: 알고리즘 중심(wallClockNow/nextDue/interval/catchUpMode)
+* 통합 테스트: Testcontainers Kafka로 주기 발행 검증
+* TopologyTestDriver: 간격을 5초 등으로 단축하여 반복 검증
+
+---
+
+## 13. 운영/구성 및 NTP
+
+* Wall-Clock 기반은 시스템 시간이 중요하므로 NTP 동기화 권장
+* 노드 간 시간 오차가 크면 파티션별 트리거 시점 불일치 가능
+
+---
+
+## 14. 결정 요약
+
+* Wall-Clock 사용
+* 분 경계 정렬 옵션
+* 파티션별 기본 + 글로벌 단일 옵션
+* Processor/Transformer 모두 제공
+* store 접근 허용 및 storeType 옵션
+* 인터벌 의미론 보강: next_due_ms + checkPeriodMs + catchUpMode
+* 기본 At-Least-Once, EOS는 향후 확장
