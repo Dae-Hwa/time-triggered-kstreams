@@ -16,6 +16,7 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.time.Duration
+import java.time.Instant
 import java.util.*
 
 class TickProcessorTopologyTest {
@@ -27,18 +28,19 @@ class TickProcessorTopologyTest {
         val topology = Topology()
         topology.addSource("source", "anchor")
 
+        val fixedNow = 100_000L
         val config = TickSchedulerConfig(
             intervalMs = 5_000,
             alignToMinute = false,
             outputTopic = "ticks"
         )
         val handler = TickHandler<String, String> { ctx ->
-            KeyValue("tick", ctx.nowEpochMs.toString())
+            KeyValue("tick", ctx.fireAtEpochMs.toString())
         }
 
         topology.addProcessor(
             "tick-processor",
-            ProcessorSupplier { TickProcessor(config, handler) },
+            ProcessorSupplier { TickProcessor(config, handler) { fixedNow } },
             "source"
         )
         topology.addSink("sink", "ticks", "tick-processor")
@@ -49,7 +51,7 @@ class TickProcessorTopologyTest {
             put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.StringSerde::class.java)
             put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.StringSerde::class.java)
         }
-        driver = TopologyTestDriver(topology, props)
+        driver = TopologyTestDriver(topology, props, Instant.ofEpochMilli(fixedNow))
     }
 
     @AfterEach

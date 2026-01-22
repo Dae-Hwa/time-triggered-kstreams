@@ -15,6 +15,7 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.time.Duration
+import java.time.Instant
 import java.util.Properties
 
 class TickProcessorAlignedTest {
@@ -34,7 +35,7 @@ class TickProcessorAlignedTest {
         // Fix time at exactly HH:mm:30.000, so the delay should be 30_000ms to the next minute
         val fixedNow = 90_000L // arbitrary epoch for test simplicity (00:01:30.000)
         val handler = TickHandler<String, String> { ctx ->
-            KeyValue("tick", ctx.nowEpochMs.toString())
+            KeyValue("tick", ctx.fireAtEpochMs.toString())
         }
 
         topology.addProcessor(
@@ -50,7 +51,7 @@ class TickProcessorAlignedTest {
             put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.StringSerde::class.java)
             put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.StringSerde::class.java)
         }
-        driver = TopologyTestDriver(topology, props)
+        driver = TopologyTestDriver(topology, props, Instant.ofEpochMilli(fixedNow))
 
         // activate topology
         val inputTopic = driver.createInputTopic(
@@ -84,12 +85,12 @@ class TickProcessorAlignedTest {
         first.shouldNotBeNull()
         first.key() shouldBe "tick"
 
-        // After aligned start, the periodic schedule is 60_000ms; 59 s shouldn't produce another
-        driver.advanceWallClockTime(Duration.ofSeconds(59))
+        // After aligned start, the periodic due is 60_000ms; stay below it
+        driver.advanceWallClockTime(Duration.ofSeconds(58))
         output.isEmpty shouldBe true
 
-        // +1s should produce the second tick
-        driver.advanceWallClockTime(Duration.ofSeconds(1))
+        // +2s should produce the second tick
+        driver.advanceWallClockTime(Duration.ofSeconds(2))
         val second = if (!output.isEmpty) output.readRecord() else null
         second.shouldNotBeNull()
         second.key() shouldBe "tick"

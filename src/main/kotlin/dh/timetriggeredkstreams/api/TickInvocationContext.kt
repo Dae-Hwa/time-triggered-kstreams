@@ -3,10 +3,14 @@ package dh.timetriggeredkstreams.api
 import org.apache.kafka.streams.processor.api.ProcessorContext
 
 class TickInvocationContext(
-    val nowEpochMs: Long,
+    val wallClockNowEpochMs: Long,
+    val fireAtEpochMs: Long,
+    val dueCount: Long,
+    val skippedCount: Long,
+    val catchUpMode: CatchUpMode,
     val taskId: String,
-    private val processorContext: ProcessorContext<*, *>?,
-    private val storeAccessor: StoreAccessor?
+    val processorContext: ProcessorContext<*, *>?,
+    val storeAccessor: StoreAccessor?
 ) {
     fun <K, V> store(): StoreAccessor.ReadWrite<K, V>? = storeAccessor?.asReadWrite()
     fun readOnly(): StoreAccessor.ReadOnly? = storeAccessor?.asReadOnly()

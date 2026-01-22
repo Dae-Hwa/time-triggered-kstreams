@@ -2,17 +2,18 @@ package dh.timetriggeredkstreams
 
 import dh.timetriggeredkstreams.api.TickHandler
 import dh.timetriggeredkstreams.api.TickSchedulerConfig
-import dh.timetriggeredkstreams.transformer.tickTransformerSupplier
 import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
 import org.apache.kafka.common.serialization.Serdes
 import org.apache.kafka.streams.StreamsConfig
 import org.apache.kafka.streams.StreamsBuilder
 import org.apache.kafka.streams.TopologyTestDriver
+import org.apache.kafka.streams.processor.api.ProcessorSupplier
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.time.Duration
+import java.time.Instant
 import java.util.*
 
 class TickTransformerTopologyTest {
@@ -24,17 +25,18 @@ class TickTransformerTopologyTest {
         val builder = StreamsBuilder()
         val anchor = builder.stream<String, String>("anchor")
 
+        val fixedNow = 100_000L
         val config = TickSchedulerConfig(
             intervalMs = 5_000,
             alignToMinute = false,
             outputTopic = "ticks-tf"
         )
         val handler = TickHandler<String, String> { ctx ->
-            org.apache.kafka.streams.KeyValue("tick", ctx.nowEpochMs.toString())
+            org.apache.kafka.streams.KeyValue("tick", ctx.fireAtEpochMs.toString())
         }
 
-        val ticks = anchor.transform(
-            tickTransformerSupplier(config, handler)
+        val ticks = anchor.process(
+            ProcessorSupplier { dh.timetriggeredkstreams.processor.TickProcessor(config, handler) { fixedNow } }
         )
         ticks.to("ticks-tf")
 
@@ -45,7 +47,7 @@ class TickTransformerTopologyTest {
             put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.StringSerde::class.java)
         }
         val topology = builder.build(props)
-        driver = TopologyTestDriver(topology, props)
+        driver = TopologyTestDriver(topology, props, Instant.ofEpochMilli(fixedNow))
     }
 
     @AfterEach

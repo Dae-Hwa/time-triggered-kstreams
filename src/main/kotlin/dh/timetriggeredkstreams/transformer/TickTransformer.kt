@@ -4,12 +4,14 @@ import dh.timetriggeredkstreams.api.StoreAccessor
 import dh.timetriggeredkstreams.api.TickHandler
 import dh.timetriggeredkstreams.api.TickInvocationContext
 import dh.timetriggeredkstreams.api.TickSchedulerConfig
+import dh.timetriggeredkstreams.computeTickPlan
 import java.time.Duration
 import org.apache.kafka.streams.KeyValue
 import org.apache.kafka.streams.kstream.Transformer
 import org.apache.kafka.streams.kstream.TransformerSupplier
 import org.apache.kafka.streams.processor.ProcessorContext
 import org.apache.kafka.streams.processor.PunctuationType
+import org.apache.kafka.streams.processor.To
 import org.apache.kafka.streams.state.KeyValueStore
 import org.apache.kafka.streams.state.ReadOnlyKeyValueStore
 
@@ -20,6 +22,7 @@ class TickTransformer<KOut, VOut>(
 ) : Transformer<Any, Any, KeyValue<KOut, VOut>?> {
 
     private lateinit var context: ProcessorContext
+    private var inMemoryNextDueEpochMs: Long? = null
     private var rwStore: KeyValueStore<Any, Any>? = null
     private var roStore: ReadOnlyKeyValueStore<Any, Any>? = null
 
@@ -44,11 +47,8 @@ class TickTransformer<KOut, VOut>(
             if (!isLeaderTask) return
         }
 
-        if (schedulerConfig.alignToMinute) {
-            scheduleAlignedToMinute()
-        } else {
-            schedulePeriodic()
-        }
+        scheduleChecks()
+        resolveNextDueEpochMs()
     }
 
     override fun transform(key: Any, value: Any): KeyValue<KOut, VOut>? {
@@ -58,46 +58,84 @@ class TickTransformer<KOut, VOut>(
 
     override fun close() {}
 
-    private fun scheduleAlignedToMinute() {
-        val now = timeProvider()
-        val delayMs = millisToNextMinute(now)
-        context.schedule(Duration.ofMillis(delayMs), PunctuationType.WALL_CLOCK_TIME) { ts ->
-            handleTick(ts)
-            context.schedule(schedulerConfig.intervalDuration(), PunctuationType.WALL_CLOCK_TIME) {
-                    ts2 ->
-                handleTick(ts2)
-            }
+    private fun scheduleChecks() {
+        context.schedule(
+            Duration.ofMillis(schedulerConfig.checkPeriodMs),
+            PunctuationType.WALL_CLOCK_TIME
+        ) { timestamp ->
+            handleCheck(timestamp)
         }
     }
 
-    private fun schedulePeriodic() {
-        context.schedule(schedulerConfig.intervalDuration(), PunctuationType.WALL_CLOCK_TIME) { ts
-            ->
-            handleTick(ts)
-        }
-    }
+    private fun handleCheck(wallClockNowEpochMs: Long) {
+        val nextDueEpochMs = resolveNextDueEpochMs()
+        val plan = computeTickPlan(
+            wallClockNowEpochMs = wallClockNowEpochMs,
+            nextDueEpochMs = nextDueEpochMs,
+            intervalMs = schedulerConfig.intervalMs,
+            catchUpMode = schedulerConfig.catchUpMode,
+            maxCatchUp = schedulerConfig.maxCatchUp
+        )
 
-    private fun handleTick(timestampMs: Long) {
-        val accessor = StoreAccessor(readOnlyStore = roStore, readWriteStore = rwStore)
-        val invocationContext =
-                TickInvocationContext(
-                        nowEpochMs = timestampMs,
-                        taskId =
-                                runCatching { context.taskId().toString() }.getOrDefault("unknown"),
+        if (plan.fires.isNotEmpty()) {
+            val accessor = StoreAccessor(readOnlyStore = roStore, readWriteStore = rwStore)
+            val taskId = runCatching { context.taskId().toString() }.getOrDefault("unknown")
+            plan.fires.forEach { fireAt ->
+                val invocationContext =
+                    TickInvocationContext(
+                        wallClockNowEpochMs = wallClockNowEpochMs,
+                        fireAtEpochMs = fireAt,
+                        dueCount = plan.dueCount,
+                        skippedCount = plan.skippedCount,
+                        catchUpMode = schedulerConfig.catchUpMode,
+                        taskId = taskId,
                         processorContext = null,
                         storeAccessor = accessor
-                )
-        val kv = tickHandler.onTick(invocationContext)
-        if (kv != null) {
-            // In Transformer API we don't set explicit timestamp; punctuation time is used as
-            // context timestamp
-            context.forward(kv.key, kv.value)
+                    )
+                val kv = tickHandler.onTick(invocationContext)
+                if (kv != null) {
+                    context.forward(kv.key, kv.value, To.all().withTimestamp(fireAt))
+                }
+            }
         }
+
+        persistNextDueEpochMs(plan.newNextDueEpochMs)
     }
 
-    private fun millisToNextMinute(nowMs: Long): Long {
-        val nextMinute = ((nowMs / 60_000) + 1) * 60_000
-        return nextMinute - nowMs
+    private fun resolveNextDueEpochMs(): Long {
+        val cached = inMemoryNextDueEpochMs
+        if (cached != null) return cached
+
+        val stored = readNextDueEpochMs()
+        if (stored != null) {
+            inMemoryNextDueEpochMs = stored
+            return stored
+        }
+
+        val initialNextDue = initialNextDueEpochMs(timeProvider())
+        persistNextDueEpochMs(initialNextDue)
+        return initialNextDue
+    }
+
+    private fun readNextDueEpochMs(): Long? {
+        val store = rwStore ?: roStore ?: return null
+        return store.get(NEXT_DUE_KEY) as? Long
+    }
+
+    private fun persistNextDueEpochMs(nextDueEpochMs: Long) {
+        rwStore?.put(NEXT_DUE_KEY, nextDueEpochMs)
+        inMemoryNextDueEpochMs = nextDueEpochMs
+    }
+
+    private fun initialNextDueEpochMs(nowEpochMs: Long): Long =
+        if (schedulerConfig.alignToMinute) {
+            ((nowEpochMs / 60_000) + 1) * 60_000
+        } else {
+            nowEpochMs + schedulerConfig.intervalMs
+        }
+
+    private companion object {
+        const val NEXT_DUE_KEY: String = "next_due_ms"
     }
 }
 

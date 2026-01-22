@@ -27,7 +27,8 @@ object TickTopologyBuilder {
         storeName: String? = null,
         sourceName: String = DEFAULT_SOURCE_NAME,
         processorName: String = DEFAULT_PROCESSOR_NAME,
-        sinkName: String = DEFAULT_SINK_NAME
+        sinkName: String = DEFAULT_SINK_NAME,
+        timeProvider: () -> Long = { System.currentTimeMillis() }
     ) {
         // Source for task creation (anchor)
         topology.addSource(sourceName, anchorTopic)
@@ -43,7 +44,7 @@ object TickTopologyBuilder {
         // Processor with effective config
         topology.addProcessor(
             processorName,
-            ProcessorSupplier { TickProcessor(effectiveConfig, tickHandler) },
+            ProcessorSupplier { TickProcessor(effectiveConfig, tickHandler, timeProvider) },
             sourceName
         )
 
