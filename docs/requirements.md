@@ -223,6 +223,19 @@ enum class CatchUpMode { LATEST_ONLY, CATCH_UP_ALL, CATCH_UP_BOUNDED }
 * 앵커 토픽/출력 토픽 기본값 유지
 * storeType/persistent 옵션 지원(선택)
 * scope/global 모드 선택 반영
+* 테스트/결정적 재현을 위해 `timeProvider: () -> Long` 옵션을 제공(기본값: `System.currentTimeMillis`)
+
+예시:
+
+```kotlin
+val fixedNow = 100_000L
+TickTopologyBuilder.addTickProcessor(
+  topology = topology,
+  schedulerConfig = config,
+  tickHandler = handler,
+  timeProvider = { fixedNow }
+)
+```
 
 ---
 
